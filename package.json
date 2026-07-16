@@ -1,0 +1,23 @@
+{
+  "name": "demo-ai-chat",
+  "version": "1.0.0",
+  "description": "Fonti Cloud — Valentina AI Chat",
+  "main": "aipublic.js",
+  "scripts": {
+    "start": "node aipublic.js",
+    "local": "node aichat.js",
+    "calendar": "node calendar_server.js",
+    "dev": "node calendar_server.js & node aichat.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "axios": "^1.18.1",
+    "dotenv": "^17.4.2",
+    "express": "^4.22.2",
+    "google-auth-library": "^10.9.0"
+  }
+}
