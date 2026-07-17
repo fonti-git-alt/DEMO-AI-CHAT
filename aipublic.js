@@ -27,7 +27,6 @@ const MAX_HISTORY = 20; // max messages per session before trimming
 const CHATWOOT_API_BASE = process.env.CHATWOOT_API_BASE || "https://app.chatwoot.com";
 const CHATWOOT_ACCOUNT_ID = process.env.CHATWOOT_ACCOUNT_ID;
 const CHATWOOT_BOT_TOKEN = process.env.CHATWOOT_BOT_TOKEN;        // Agent Bot access token (for replies)
-const CHATWOOT_API_TOKEN = process.env.CHATWOOT_API_TOKEN;        // Account API token (general operations)
 const CHATWOOT_WEBHOOK_SECRET = process.env.CHATWOOT_WEBHOOK_SECRET; // optional, for HMAC verification
 
 function verifyChatwootSignature(req) {
@@ -47,10 +46,8 @@ function verifyChatwootSignature(req) {
 }
 
 async function replyToChatwoot(conversationId, content) {
-  // Use bot token for replies (required by Agent Bot), fallback to API token
-  const token = CHATWOOT_BOT_TOKEN || CHATWOOT_API_TOKEN;
-  if (!token) {
-    console.error("❌ Chatwoot: No token set. Need CHATWOOT_BOT_TOKEN (Agent Bot) or CHATWOOT_API_TOKEN");
+  if (!CHATWOOT_BOT_TOKEN) {
+    console.error("❌ Chatwoot: CHATWOOT_BOT_TOKEN not set");
     return;
   }
 
@@ -62,7 +59,7 @@ async function replyToChatwoot(conversationId, content) {
       { content, message_type: "outgoing" },
       {
         headers: {
-          api_access_token: token,
+          api_access_token: CHATWOOT_BOT_TOKEN,
           "Content-Type": "application/json",
         },
       }
@@ -500,11 +497,7 @@ app.post("/webhook/chatwoot", async (req, res) => {
   try {
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     console.log("📨 Chatwoot webhook received");
-    console.log(`   Event: ${req.body?.event || "none"}`);
-    console.log(`   Message type: ${req.body?.message?.message_type || "none"}`);
-    console.log(`   Content: ${(req.body?.message?.content || "").substring(0, 100)}`);
-    console.log(`   Conversation ID: ${req.body?.conversation?.id || "none"}`);
-    console.log(`   Private: ${req.body?.message?.private}`);
+    console.log(JSON.stringify(req.body, null, 2));
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     // 1. Verify signature
@@ -819,7 +812,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   const tokens = loadSavedTokens();
   const hasBotToken = !!CHATWOOT_BOT_TOKEN;
-  const hasApiToken = !!CHATWOOT_API_TOKEN;
   const hasChatwoot = CHATWOOT_ACCOUNT_ID && (hasBotToken || hasApiToken);
   console.log(`🚀 Fonti Cloud — Valentina API running on port ${PORT}`);
   console.log(`   POST /chat          — send a message`);
@@ -832,6 +824,5 @@ app.listen(PORT, () => {
   console.log(`   Calendar: /calendar/{list,create,update,delete}`);
   console.log(`   Google Calendar: ${tokens ? "✅ Connected" : "⚠️  Not connected — visit /auth/google"}`);
   console.log(`   Chatwoot Bot Token: ${hasBotToken ? "✅ Set (CHATWOOT_BOT_TOKEN)" : "⚠️  Not set"}`);
-  console.log(`   Chatwoot API Token: ${hasApiToken ? "✅ Set (CHATWOOT_API_TOKEN)" : "⚠️  Not set"}`);
   console.log(`   Chatwoot Account:   ${CHATWOOT_ACCOUNT_ID ? "✅ Set" : "⚠️  Not set (CHATWOOT_ACCOUNT_ID)"}`);
 });
