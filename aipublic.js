@@ -26,7 +26,8 @@ const MAX_HISTORY = 20; // max messages per session before trimming
 // ══════════════════════════════════════════════════════════════════════════════
 const CHATWOOT_API_BASE = process.env.CHATWOOT_API_BASE || "https://app.chatwoot.com";
 const CHATWOOT_ACCOUNT_ID = process.env.CHATWOOT_ACCOUNT_ID;
-const CHATWOOT_API_TOKEN = process.env.CHATWOOT_API_TOKEN;
+const CHATWOOT_BOT_TOKEN = process.env.CHATWOOT_BOT_TOKEN;        // Agent Bot access token (for replies)
+const CHATWOOT_API_TOKEN = process.env.CHATWOOT_API_TOKEN;        // Account API token (general operations)
 const CHATWOOT_WEBHOOK_SECRET = process.env.CHATWOOT_WEBHOOK_SECRET; // optional, for HMAC verification
 
 function verifyChatwootSignature(req) {
@@ -46,8 +47,10 @@ function verifyChatwootSignature(req) {
 }
 
 async function replyToChatwoot(conversationId, content) {
-  if (!CHATWOOT_ACCOUNT_ID || !CHATWOOT_API_TOKEN) {
-    console.error("❌ Chatwoot: CHATWOOT_ACCOUNT_ID or CHATWOOT_API_TOKEN not set");
+  // Use bot token for replies (required by Agent Bot), fallback to API token
+  const token = CHATWOOT_BOT_TOKEN || CHATWOOT_API_TOKEN;
+  if (!token) {
+    console.error("❌ Chatwoot: No token set. Need CHATWOOT_BOT_TOKEN (Agent Bot) or CHATWOOT_API_TOKEN");
     return;
   }
 
@@ -59,7 +62,7 @@ async function replyToChatwoot(conversationId, content) {
       { content, message_type: "outgoing" },
       {
         headers: {
-          api_access_token: CHATWOOT_API_TOKEN,
+          api_access_token: token,
           "Content-Type": "application/json",
         },
       }
@@ -198,10 +201,21 @@ function loadSavedTokens() {
   // 2. Try env var (Render / production)
   if (process.env.GOOGLE_TOKENS_JSON) {
     try {
-      const raw = process.env.GOOGLE_TOKENS_JSON;
+      let raw = process.env.GOOGLE_TOKENS_JSON;
+
+      // Sanitize common env var issues
+      raw = raw.trim();
+      // Remove wrapping quotes if present: "JSON" → JSON
+      if (raw.startsWith('"') && raw.endsWith('"')) {
+        raw = raw.slice(1, -1);
+      }
+      // Unescape backslashes that Render might have double-escaped
+      raw = raw.replace(/\\"/g, '"');
+
       console.log(`🔍 GOOGLE_TOKENS_JSON length: ${raw.length}`);
       console.log(`🔍 First 80 chars: ${raw.substring(0, 80)}`);
       console.log(`🔍 Last 80 chars: ${raw.substring(raw.length - 80)}`);
+
       const data = cleanTokens(JSON.parse(raw));
       oauth2Client.setCredentials(data);
       console.log("🔐 Google tokens loaded from GOOGLE_TOKENS_JSON env var");
@@ -213,6 +227,7 @@ function loadSavedTokens() {
       console.error(`   Length: ${raw.length}`);
       console.error(`   First 200 chars: ${raw.substring(0, 200)}`);
       console.error(`   Last 200 chars: ${raw.substring(raw.length - 200)}`);
+      console.error(`   HEX dump first 50: ${Buffer.from(raw.substring(0, 50)).toString("hex")}`);
       return null;
     }
   }
@@ -483,6 +498,15 @@ app.get("/health", (_req, res) => {
 
 app.post("/webhook/chatwoot", async (req, res) => {
   try {
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("📨 Chatwoot webhook received");
+    console.log(`   Event: ${req.body?.event || "none"}`);
+    console.log(`   Message type: ${req.body?.message?.message_type || "none"}`);
+    console.log(`   Content: ${(req.body?.message?.content || "").substring(0, 100)}`);
+    console.log(`   Conversation ID: ${req.body?.conversation?.id || "none"}`);
+    console.log(`   Private: ${req.body?.message?.private}`);
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
     // 1. Verify signature
     if (!verifyChatwootSignature(req)) {
       console.warn("⚠️ Chatwoot: Invalid webhook signature");
@@ -493,11 +517,13 @@ app.post("/webhook/chatwoot", async (req, res) => {
 
     // 2. Only process incoming messages
     if (event !== "message_created") {
+      console.log(`⏭️ Skipped event: ${event}`);
       return res.status(200).json({ received: true, skipped: event });
     }
 
     // 3. Skip outgoing messages (avoid loops) and private messages
     if (message?.message_type !== "incoming" || message?.private) {
+      console.log(`⏭️ Skipped message: type=${message?.message_type}, private=${message?.private}`);
       return res.status(200).json({ received: true, skipped: "not incoming" });
     }
 
@@ -505,10 +531,11 @@ app.post("/webhook/chatwoot", async (req, res) => {
     const conversationId = conversation?.id;
 
     if (!content || !conversationId) {
+      console.log("⏭️ Skipped: no content or conversation ID");
       return res.status(200).json({ received: true, skipped: "no content or conversation" });
     }
 
-    console.log(`📩 [Chatwoot:${conversationId}] ${content}`);
+    console.log(`📩 [Chatwoot:${conversationId}] Processing: ${content}`);
 
     // 4. Return 200 immediately (Chatwoot expects fast response)
     res.status(200).json({ received: true });
@@ -519,11 +546,12 @@ app.post("/webhook/chatwoot", async (req, res) => {
     session.messages.push({ role: "user", content });
     session.messages = trimHistory(session.messages);
 
+    console.log(`🤖 [Chatwoot:${conversationId}] Calling AI...`);
     const choice = await callAI(session.messages);
     const reply = await processResponse(choice, session.messages);
     session.messages.push({ role: "assistant", content: reply });
 
-    console.log(`💬 [Chatwoot:${conversationId}] ${reply}`);
+    console.log(`💬 [Chatwoot:${conversationId}] Reply: ${reply}`);
 
     // 6. Send reply back to Chatwoot
     await replyToChatwoot(conversationId, reply);
@@ -624,13 +652,23 @@ app.get("/auth/debug", (_req, res) => {
 
   const result = {
     configured: true,
-    length: raw.length,
+    rawLength: raw.length,
     firstChars: raw.substring(0, 50),
     lastChars: raw.substring(raw.length - 50),
+    hasWrappingQuotes: raw.startsWith('"') && raw.endsWith('"'),
+    hasBackslashes: raw.includes('\\'),
   };
 
+  // Try sanitizing and parsing
   try {
-    const parsed = JSON.parse(raw);
+    let sanitized = raw.trim();
+    if (sanitized.startsWith('"') && sanitized.endsWith('"')) {
+      sanitized = sanitized.slice(1, -1);
+    }
+    sanitized = sanitized.replace(/\\"/g, '"');
+    result.sanitizedLength = sanitized.length;
+
+    const parsed = JSON.parse(sanitized);
     result.validJson = true;
     result.keys = Object.keys(parsed);
     result.hasAccessToken = !!parsed.access_token;
@@ -640,6 +678,8 @@ app.get("/auth/debug", (_req, res) => {
   } catch (err) {
     result.validJson = false;
     result.parseError = err.message;
+    // Show hex dump of first 100 chars to see exact bytes
+    result.hexFirst100 = Buffer.from(raw.substring(0, 100)).toString("hex");
   }
 
   res.json(result);
@@ -778,7 +818,9 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   const tokens = loadSavedTokens();
-  const hasChatwoot = CHATWOOT_ACCOUNT_ID && CHATWOOT_API_TOKEN;
+  const hasBotToken = !!CHATWOOT_BOT_TOKEN;
+  const hasApiToken = !!CHATWOOT_API_TOKEN;
+  const hasChatwoot = CHATWOOT_ACCOUNT_ID && (hasBotToken || hasApiToken);
   console.log(`🚀 Fonti Cloud — Valentina API running on port ${PORT}`);
   console.log(`   POST /chat          — send a message`);
   console.log(`   POST /chat/reset    — reset a session`);
@@ -789,5 +831,7 @@ app.listen(PORT, () => {
   console.log(`   GET  /auth/debug    — diagnose GOOGLE_TOKENS_JSON`);
   console.log(`   Calendar: /calendar/{list,create,update,delete}`);
   console.log(`   Google Calendar: ${tokens ? "✅ Connected" : "⚠️  Not connected — visit /auth/google"}`);
-  console.log(`   Chatwoot Webhook:  ${hasChatwoot ? "✅ Configured" : "⚠️  Set CHATWOOT_ACCOUNT_ID + CHATWOOT_API_TOKEN"}`);
+  console.log(`   Chatwoot Bot Token: ${hasBotToken ? "✅ Set (CHATWOOT_BOT_TOKEN)" : "⚠️  Not set"}`);
+  console.log(`   Chatwoot API Token: ${hasApiToken ? "✅ Set (CHATWOOT_API_TOKEN)" : "⚠️  Not set"}`);
+  console.log(`   Chatwoot Account:   ${CHATWOOT_ACCOUNT_ID ? "✅ Set" : "⚠️  Not set (CHATWOOT_ACCOUNT_ID)"}`);
 });
