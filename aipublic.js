@@ -506,7 +506,7 @@ app.post("/webhook/chatwoot", async (req, res) => {
       return res.status(401).json({ error: "Invalid signature" });
     }
 
-    const { event, message, conversation } = req.body;
+    const { event, conversation } = req.body;
 
     // 2. Only process incoming messages
     if (event !== "message_created") {
@@ -515,20 +515,25 @@ app.post("/webhook/chatwoot", async (req, res) => {
     }
 
     // 3. Skip outgoing messages (avoid loops) and private messages
-    if (message?.message_type !== "incoming" || message?.private) {
-      console.log(`⏭️ Skipped message: type=${message?.message_type}, private=${message?.private}`);
+    // Agent Bot payloads are flat — fields are at root level, not nested under "message"
+    const message_type = req.body.message_type;
+    const isPrivate = req.body.private;
+    const content = req.body.content;
+    const conversationId = conversation?.id;
+
+    if (message_type !== "incoming" || isPrivate) {
+      console.log(`⏭️ Skipped message: type=${message_type}, private=${isPrivate}`);
       return res.status(200).json({ received: true, skipped: "not incoming" });
     }
-
-    const content = message?.content;
-    const conversationId = conversation?.id;
 
     if (!content || !conversationId) {
       console.log("⏭️ Skipped: no content or conversation ID");
       return res.status(200).json({ received: true, skipped: "no content or conversation" });
     }
 
-    console.log(`📩 [Chatwoot:${conversationId}] Processing: ${content}`);
+    const senderName = req.body.sender?.name || "Unknown";
+
+    console.log(`📩 [Chatwoot:${conversationId}] ${senderName}: ${content}`);
 
     // 4. Return 200 immediately (Chatwoot expects fast response)
     res.status(200).json({ received: true });
