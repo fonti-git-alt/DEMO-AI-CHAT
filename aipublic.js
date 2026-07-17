@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
+import crypto from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
@@ -19,6 +20,57 @@ const MODEL = "minimaxai/minimax-m3";
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 5000;
 const MAX_HISTORY = 20; // max messages per session before trimming
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CHATWOOT WEBHOOK
+// ══════════════════════════════════════════════════════════════════════════════
+const CHATWOOT_API_BASE = process.env.CHATWOOT_API_BASE || "https://app.chatwoot.com";
+const CHATWOOT_ACCOUNT_ID = process.env.CHATWOOT_ACCOUNT_ID;
+const CHATWOOT_API_TOKEN = process.env.CHATWOOT_API_TOKEN;
+const CHATWOOT_WEBHOOK_SECRET = process.env.CHATWOOT_WEBHOOK_SECRET; // optional, for HMAC verification
+
+function verifyChatwootSignature(req) {
+  if (!CHATWOOT_WEBHOOK_SECRET) return true; // skip if no secret configured
+
+  const timestamp = req.headers["x-chatwoot-timestamp"];
+  const signature = req.headers["x-chatwoot-signature"];
+  if (!timestamp || !signature) return false;
+
+  const rawBody = JSON.stringify(req.body);
+  const expected = `sha256=${crypto
+    .createHmac("sha256", CHATWOOT_WEBHOOK_SECRET)
+    .update(`${timestamp}.${rawBody}`)
+    .digest("hex")}`;
+
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+
+async function replyToChatwoot(conversationId, content) {
+  if (!CHATWOOT_ACCOUNT_ID || !CHATWOOT_API_TOKEN) {
+    console.error("❌ Chatwoot: CHATWOOT_ACCOUNT_ID or CHATWOOT_API_TOKEN not set");
+    return;
+  }
+
+  const url = `${CHATWOOT_API_BASE}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/messages`;
+
+  try {
+    const resp = await axios.post(
+      url,
+      { content, message_type: "outgoing" },
+      {
+        headers: {
+          api_access_token: CHATWOOT_API_TOKEN,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    console.log(`✅ Chatwoot reply sent to conversation ${conversationId}`);
+    return resp.data;
+  } catch (err) {
+    const detail = err.response?.data || err.message;
+    console.error(`❌ Chatwoot reply failed (conv ${conversationId}):`, detail);
+  }
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // AI TOOLS
@@ -379,6 +431,64 @@ app.get("/health", (_req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ROUTES — Chatwoot Webhook
+// ══════════════════════════════════════════════════════════════════════════════
+
+app.post("/webhook/chatwoot", async (req, res) => {
+  try {
+    // 1. Verify signature
+    if (!verifyChatwootSignature(req)) {
+      console.warn("⚠️ Chatwoot: Invalid webhook signature");
+      return res.status(401).json({ error: "Invalid signature" });
+    }
+
+    const { event, message, conversation } = req.body;
+
+    // 2. Only process incoming messages
+    if (event !== "message_created") {
+      return res.status(200).json({ received: true, skipped: event });
+    }
+
+    // 3. Skip outgoing messages (avoid loops) and private messages
+    if (message?.message_type !== "incoming" || message?.private) {
+      return res.status(200).json({ received: true, skipped: "not incoming" });
+    }
+
+    const content = message?.content;
+    const conversationId = conversation?.id;
+
+    if (!content || !conversationId) {
+      return res.status(200).json({ received: true, skipped: "no content or conversation" });
+    }
+
+    console.log(`📩 [Chatwoot:${conversationId}] ${content}`);
+
+    // 4. Return 200 immediately (Chatwoot expects fast response)
+    res.status(200).json({ received: true });
+
+    // 5. Process AI response asynchronously
+    const sessionId = `chatwoot:${conversationId}`;
+    const session = getSession(sessionId);
+    session.messages.push({ role: "user", content });
+    session.messages = trimHistory(session.messages);
+
+    const choice = await callAI(session.messages);
+    const reply = await processResponse(choice, session.messages);
+    session.messages.push({ role: "assistant", content: reply });
+
+    console.log(`💬 [Chatwoot:${conversationId}] ${reply}`);
+
+    // 6. Send reply back to Chatwoot
+    await replyToChatwoot(conversationId, reply);
+  } catch (error) {
+    console.error("❌ Chatwoot webhook error:", error.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Internal error" });
+    }
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ROUTES — Google OAuth2
 // ══════════════════════════════════════════════════════════════════════════════
 const SCOPES = [
@@ -579,11 +689,14 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   const hasTokens = existsSync(TOKENS_PATH);
+  const hasChatwoot = CHATWOOT_ACCOUNT_ID && CHATWOOT_API_TOKEN;
   console.log(`🚀 Fonti Cloud — Valentina API running on port ${PORT}`);
   console.log(`   POST /chat          — send a message`);
   console.log(`   POST /chat/reset    — reset a session`);
+  console.log(`   POST /webhook/chatwoot — Chatwoot webhook`);
   console.log(`   GET  /auth/google   — OAuth2 flow`);
   console.log(`   GET  /auth/status   — connection status`);
   console.log(`   Calendar: /calendar/{list,create,update,delete}`);
   console.log(`   Google Calendar: ${hasTokens ? "✅ Connected" : "⚠️  Not connected"}`);
+  console.log(`   Chatwoot Webhook:  ${hasChatwoot ? "✅ Configured" : "⚠️  Set CHATWOOT_ACCOUNT_ID + CHATWOOT_API_TOKEN"}`);
 });
