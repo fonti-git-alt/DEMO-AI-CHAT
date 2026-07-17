@@ -188,7 +188,7 @@ function loadSavedTokens() {
   if (existsSync(TOKENS_PATH)) {
     try {
       const raw = readFileSync(TOKENS_PATH, "utf-8");
-      const data = JSON.parse(raw);
+      const data = cleanTokens(JSON.parse(raw));
       oauth2Client.setCredentials(data);
       console.log("📂 Google tokens loaded from file");
       return data;
@@ -198,12 +198,21 @@ function loadSavedTokens() {
   // 2. Try env var (Render / production)
   if (process.env.GOOGLE_TOKENS_JSON) {
     try {
-      const data = JSON.parse(process.env.GOOGLE_TOKENS_JSON);
+      const raw = process.env.GOOGLE_TOKENS_JSON;
+      console.log(`🔍 GOOGLE_TOKENS_JSON length: ${raw.length}`);
+      console.log(`🔍 First 80 chars: ${raw.substring(0, 80)}`);
+      console.log(`🔍 Last 80 chars: ${raw.substring(raw.length - 80)}`);
+      const data = cleanTokens(JSON.parse(raw));
       oauth2Client.setCredentials(data);
       console.log("🔐 Google tokens loaded from GOOGLE_TOKENS_JSON env var");
       return data;
-    } catch {
+    } catch (err) {
       console.error("❌ GOOGLE_TOKENS_JSON is invalid JSON");
+      console.error(`   Error: ${err.message}`);
+      const raw = process.env.GOOGLE_TOKENS_JSON;
+      console.error(`   Length: ${raw.length}`);
+      console.error(`   First 200 chars: ${raw.substring(0, 200)}`);
+      console.error(`   Last 200 chars: ${raw.substring(raw.length - 200)}`);
       return null;
     }
   }
@@ -212,10 +221,12 @@ function loadSavedTokens() {
 }
 
 function saveTokens(tokens) {
+  const clean = cleanTokens(tokens);
+
   // Always save to file (works locally)
   try {
     mkdirSync(TOKENS_DIR, { recursive: true });
-    writeFileSync(TOKENS_PATH, JSON.stringify(tokens, null, 2));
+    writeFileSync(TOKENS_PATH, JSON.stringify(clean, null, 2));
     console.log("💾 Google tokens saved to file");
   } catch (err) {
     console.error("⚠️ Could not save tokens to file:", err.message);
@@ -225,7 +236,7 @@ function saveTokens(tokens) {
   if (process.env.RENDER || process.env.NODE_ENV === "production") {
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     console.log("⚡ PERSIST TOKENS: Copy this JSON to GOOGLE_TOKENS_JSON env var");
-    console.log(JSON.stringify(tokens));
+    console.log(JSON.stringify(clean));
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   }
 }
@@ -250,6 +261,12 @@ async function ensureAuth() {
       throw new Error("Token refresh failed. Re-authoriza en /auth/google");
     }
   }
+}
+
+// Strip non-standard fields that confuse google-auth-library
+function cleanTokens(tokens) {
+  const { refresh_token_expires_in, ...clean } = tokens;
+  return clean;
 }
 
 async function calendarAuthHeaders() {
@@ -598,9 +615,35 @@ app.get("/auth/tokens", (_req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ROUTES — Calendar (direct API, same as calendar_server.js)
-// ══════════════════════════════════════════════════════════════════════════════
+// Diagnostic: check GOOGLE_TOKENS_JSON env var
+app.get("/auth/debug", (_req, res) => {
+  const raw = process.env.GOOGLE_TOKENS_JSON;
+  if (!raw) {
+    return res.json({ configured: false, error: "GOOGLE_TOKENS_JSON env var is not set" });
+  }
+
+  const result = {
+    configured: true,
+    length: raw.length,
+    firstChars: raw.substring(0, 50),
+    lastChars: raw.substring(raw.length - 50),
+  };
+
+  try {
+    const parsed = JSON.parse(raw);
+    result.validJson = true;
+    result.keys = Object.keys(parsed);
+    result.hasAccessToken = !!parsed.access_token;
+    result.hasRefreshToken = !!parsed.refresh_token;
+    result.hasExpiryDate = !!parsed.expiry_date;
+    result.hasRefreshExpiresIn = "refresh_token_expires_in" in parsed;
+  } catch (err) {
+    result.validJson = false;
+    result.parseError = err.message;
+  }
+
+  res.json(result);
+});
 
 app.post("/calendar/list", async (req, res) => {
   try {
@@ -743,6 +786,7 @@ app.listen(PORT, () => {
   console.log(`   GET  /auth/google   — OAuth2 flow`);
   console.log(`   GET  /auth/status   — connection status`);
   console.log(`   GET  /auth/tokens   — export tokens for env var`);
+  console.log(`   GET  /auth/debug    — diagnose GOOGLE_TOKENS_JSON`);
   console.log(`   Calendar: /calendar/{list,create,update,delete}`);
   console.log(`   Google Calendar: ${tokens ? "✅ Connected" : "⚠️  Not connected — visit /auth/google"}`);
   console.log(`   Chatwoot Webhook:  ${hasChatwoot ? "✅ Configured" : "⚠️  Set CHATWOOT_ACCOUNT_ID + CHATWOOT_API_TOKEN"}`);
