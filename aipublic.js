@@ -184,20 +184,50 @@ const oauth2Client = new OAuth2Client(
 );
 
 function loadSavedTokens() {
-  if (!existsSync(TOKENS_PATH)) return null;
-  try {
-    const raw = readFileSync(TOKENS_PATH, "utf-8");
-    const data = JSON.parse(raw);
-    oauth2Client.setCredentials(data);
-    return data;
-  } catch {
-    return null;
+  // 1. Try file first (local dev)
+  if (existsSync(TOKENS_PATH)) {
+    try {
+      const raw = readFileSync(TOKENS_PATH, "utf-8");
+      const data = JSON.parse(raw);
+      oauth2Client.setCredentials(data);
+      console.log("📂 Google tokens loaded from file");
+      return data;
+    } catch { /* fall through to env var */ }
   }
+
+  // 2. Try env var (Render / production)
+  if (process.env.GOOGLE_TOKENS_JSON) {
+    try {
+      const data = JSON.parse(process.env.GOOGLE_TOKENS_JSON);
+      oauth2Client.setCredentials(data);
+      console.log("🔐 Google tokens loaded from GOOGLE_TOKENS_JSON env var");
+      return data;
+    } catch {
+      console.error("❌ GOOGLE_TOKENS_JSON is invalid JSON");
+      return null;
+    }
+  }
+
+  return null;
 }
 
 function saveTokens(tokens) {
-  mkdirSync(TOKENS_DIR, { recursive: true });
-  writeFileSync(TOKENS_PATH, JSON.stringify(tokens, null, 2));
+  // Always save to file (works locally)
+  try {
+    mkdirSync(TOKENS_DIR, { recursive: true });
+    writeFileSync(TOKENS_PATH, JSON.stringify(tokens, null, 2));
+    console.log("💾 Google tokens saved to file");
+  } catch (err) {
+    console.error("⚠️ Could not save tokens to file:", err.message);
+  }
+
+  // In production, remind about env var
+  if (process.env.RENDER || process.env.NODE_ENV === "production") {
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("⚡ PERSIST TOKENS: Copy this JSON to GOOGLE_TOKENS_JSON env var");
+    console.log(JSON.stringify(tokens));
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  }
 }
 
 function saveAccountInfo(info) {
@@ -541,14 +571,30 @@ app.get("/auth/google/callback", async (req, res) => {
 
 app.get("/auth/status", (_req, res) => {
   try {
-    if (!existsSync(TOKENS_PATH)) return res.json({ connected: false });
     const tokens = loadSavedTokens();
+    if (!tokens) return res.json({ connected: false });
     const account = existsSync(ACCOUNT_PATH)
       ? JSON.parse(readFileSync(ACCOUNT_PATH, "utf-8"))
       : null;
     res.json({ connected: true, has_refresh_token: !!tokens?.refresh_token, account });
   } catch {
     res.json({ connected: false });
+  }
+});
+
+// Export tokens for env var setup (production helper)
+app.get("/auth/tokens", (_req, res) => {
+  try {
+    const tokens = loadSavedTokens();
+    if (!tokens) {
+      return res.status(404).json({ error: "No tokens found. Authenticate first at /auth/google" });
+    }
+    res.json({
+      message: "Copy this value to GOOGLE_TOKENS_JSON env var in Render",
+      GOOGLE_TOKENS_JSON: JSON.stringify(tokens),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -688,7 +734,7 @@ app.delete("/calendar/delete", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  const hasTokens = existsSync(TOKENS_PATH);
+  const tokens = loadSavedTokens();
   const hasChatwoot = CHATWOOT_ACCOUNT_ID && CHATWOOT_API_TOKEN;
   console.log(`🚀 Fonti Cloud — Valentina API running on port ${PORT}`);
   console.log(`   POST /chat          — send a message`);
@@ -696,7 +742,8 @@ app.listen(PORT, () => {
   console.log(`   POST /webhook/chatwoot — Chatwoot webhook`);
   console.log(`   GET  /auth/google   — OAuth2 flow`);
   console.log(`   GET  /auth/status   — connection status`);
+  console.log(`   GET  /auth/tokens   — export tokens for env var`);
   console.log(`   Calendar: /calendar/{list,create,update,delete}`);
-  console.log(`   Google Calendar: ${hasTokens ? "✅ Connected" : "⚠️  Not connected"}`);
+  console.log(`   Google Calendar: ${tokens ? "✅ Connected" : "⚠️  Not connected — visit /auth/google"}`);
   console.log(`   Chatwoot Webhook:  ${hasChatwoot ? "✅ Configured" : "⚠️  Set CHATWOOT_ACCOUNT_ID + CHATWOOT_API_TOKEN"}`);
 });
